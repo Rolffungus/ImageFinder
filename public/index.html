@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LinkedIn Image Finder</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0a0e1a;
+      color: #e0e6f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 16px;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+
+    p.subtitle {
+      color: #64748b;
+      margin-bottom: 32px;
+      font-size: 0.9rem;
+    }
+
+    .card {
+      background: #111827;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 28px;
+      width: 100%;
+      max-width: 680px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #94a3b8;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 140px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #e0e6f0;
+      font-size: 0.95rem;
+      padding: 12px 14px;
+      resize: vertical;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    textarea:focus { border-color: #38bdf8; }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #e0e6f0;
+      font-size: 0.9rem;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input[type="text"]:focus { border-color: #38bdf8; }
+    input::placeholder { color: #475569; }
+
+    button {
+      padding: 10px 22px;
+      background: linear-gradient(135deg, #0ea5e9, #6366f1);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+      white-space: nowrap;
+    }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #status {
+      margin-top: 20px;
+      font-size: 0.9rem;
+      color: #64748b;
+      min-height: 20px;
+    }
+
+    #result {
+      display: none;
+      margin-top: 20px;
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    #result img {
+      width: 100%;
+      max-height: 320px;
+      object-fit: cover;
+      display: block;
+    }
+
+    .result-meta {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .meta-row {
+      display: flex;
+      gap: 8px;
+      font-size: 0.85rem;
+    }
+    .meta-label { color: #475569; min-width: 80px; }
+    .meta-value { color: #e0e6f0; word-break: break-all; }
+    .meta-value a { color: #38bdf8; text-decoration: none; }
+    .meta-value a:hover { text-decoration: underline; }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: #1e3a5f;
+      color: #38bdf8;
+    }
+
+    .error-box {
+      margin-top: 20px;
+      background: #1a0a0a;
+      border: 1px solid #7f1d1d;
+      border-radius: 8px;
+      padding: 14px 16px;
+      color: #f87171;
+      font-size: 0.88rem;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>LinkedIn Image Finder</h1>
+  <p class="subtitle">Finds or generates a tech/futuristic image and uploads it to Google Drive</p>
+
+  <div class="card">
+    <label for="post">LinkedIn Post</label>
+    <textarea id="post" placeholder="Paste your LinkedIn post text here..."></textarea>
+
+    <div class="row">
+      <input type="text" id="apiKey" placeholder="x-api-key (your APP_SECRET)" />
+      <button id="btn" onclick="findImage()">Find Image</button>
+    </div>
+
+    <div id="status"></div>
+    <div class="error-box" id="errorBox"></div>
+
+    <div id="result">
+      <img id="preview" src="" alt="Preview" />
+      <div class="result-meta">
+        <div class="meta-row">
+          <span class="meta-label">Topic</span>
+          <span class="meta-value" id="rTopic"></span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-label">Source</span>
+          <span class="meta-value"><span class="badge" id="rSource"></span></span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-label">Folder</span>
+          <span class="meta-value" id="rFolder"></span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-label">Drive Link</span>
+          <span class="meta-value"><a id="rLink" href="#" target="_blank" rel="noopener">Open in Drive</a></span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-label">File ID</span>
+          <span class="meta-value" id="rId"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function findImage() {
+      const post = document.getElementById('post').value.trim();
+      const apiKey = document.getElementById('apiKey').value.trim();
+      const btn = document.getElementById('btn');
+      const status = document.getElementById('status');
+      const errorBox = document.getElementById('errorBox');
+      const result = document.getElementById('result');
+
+      if (!post) { alert('Please paste your LinkedIn post first.'); return; }
+
+      btn.disabled = true;
+      errorBox.style.display = 'none';
+      result.style.display = 'none';
+      status.textContent = 'Extracting keywords...';
+
+      const steps = [
+        'Extracting keywords...',
+        'Searching Pexels → Unsplash → SERP → DALL-E...',
+        'Downloading & resizing image...',
+        'Uploading to Google Drive...'
+      ];
+      let step = 0;
+      const ticker = setInterval(() => {
+        if (step < steps.length - 1) step++;
+        status.textContent = steps[step];
+      }, 3000);
+
+      try {
+        const resp = await fetch('/api/find-image', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(apiKey ? { 'x-api-key': apiKey } : {})
+          },
+          body: JSON.stringify({ linkedin_post: post })
+        });
+
+        clearInterval(ticker);
+        const data = await resp.json();
+
+        if (!data.success) throw new Error(data.error || 'Unknown error');
+
+        status.textContent = '✓ Done!';
+        document.getElementById('preview').src = data.image_url;
+        document.getElementById('rTopic').textContent = data.topic;
+        document.getElementById('rSource').textContent = data.source;
+        document.getElementById('rFolder').textContent = data.folder;
+        document.getElementById('rLink').href = data.drive_link;
+        document.getElementById('rId').textContent = data.file_id;
+        result.style.display = 'block';
+      } catch (err) {
+        clearInterval(ticker);
+        status.textContent = '';
+        errorBox.textContent = 'Error: ' + err.message;
+        errorBox.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>
