@@ -22,12 +22,12 @@ const GOOGLE_REFRESH_TOKEN  = process.env.GOOGLE_REFRESH_TOKEN;
 const GOOGLE_ROOT_FOLDER_ID = process.env.GOOGLE_ROOT_FOLDER_ID;
 const APP_SECRET            = process.env.APP_SECRET;
 
-// ─── Pricing (USD per token, as of 2026) ──────────────────────────────────────
+// ─── Pricing (USD) ────────────────────────────────────────────────────────────
 const PRICE = {
-  'gpt-4o-mini': { input: 0.15  / 1_000_000, output: 0.60  / 1_000_000 },
-  'gpt-4o':      { input: 2.50  / 1_000_000, output: 10.00 / 1_000_000 },
-  'dalle3':      0.080,   // standard 1792×1024 per image
-  'serp':        0.001    // per search call
+  'gpt-4o-mini': { input: 0.15 / 1_000_000, output: 0.60 / 1_000_000 },
+  'gpt-4o':      { input: 2.50 / 1_000_000, output: 10.00 / 1_000_000 },
+  'dalle3':      0.080,  // standard 1792×1024 per image
+  'serp':        0.001   // per search call
 };
 
 function calcTokenCost(model, inputTokens, outputTokens) {
@@ -50,17 +50,13 @@ const QUALITY_GUIDE = fs.readFileSync(path.join(__dirname, 'quality.md'), 'utf8'
 
 // ─── Google Drive client ──────────────────────────────────────────────────────
 const oauth2Client = new google.auth.OAuth2(
-  GOOGLE_CLIENT_ID,
-  GOOGLE_CLIENT_SECRET,
-  'http://localhost:3000/oauth/callback'
+  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, 'http://localhost:3000/oauth/callback'
 );
 oauth2Client.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
 const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-// ─── Health check (no auth required) ─────────────────────────────────────────
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+// ─── Health check ─────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
 // ─── Security middleware ──────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -71,36 +67,50 @@ app.use((req, res, next) => {
 });
 
 // ─── Step 1: Deep keyword extraction ─────────────────────────────────────────
+// Returns: topic, search_queries[3], serp_queries[3], dalle_prompt,
+//          visual_theme, visual_style, main_entity, forbidden_brands, min_score
 async function extractKeywords(postText, costs) {
   const response = await axios.post(
     'https://api.openai.com/v1/chat/completions',
     {
       model: 'gpt-4o-mini',
-      max_tokens: 500,
+      max_tokens: 700,
       messages: [
         { role: 'system', content: QUALITY_GUIDE },
         {
           role: 'user',
-          content: `Analyze this LinkedIn post and extract image search intelligence.
+          content: `Analyze this LinkedIn post deeply to extract precise image search intelligence.
 
 Post:
 """
-${postText.substring(0, 800)}
+${postText.substring(0, 1000)}
 """
+
+Think step by step:
+1. What is the post EXACTLY about? (specific company, product, concept?)
+2. What visual would PERFECTLY illustrate this — be specific and creative
+3. What Google Image searches would find real photos of this company/topic?
+4. What should DALL-E generate if no real photo is good enough?
 
 Respond ONLY in valid JSON (no markdown fences):
 {
   "topic": "<3-word summary in snake_case>",
   "search_queries": [
-    "<specific: main entity + core visual concept>",
-    "<broader: core concept without entity name>",
-    "<abstract: visual metaphor for the feeling/theme>"
+    "<Pexels/Unsplash query: core visual concept + aesthetic, e.g. 'neural network glowing dark blue'>",
+    "<Pexels/Unsplash query: broader visual concept, e.g. 'artificial intelligence technology abstract'>",
+    "<Pexels/Unsplash query: metaphorical/creative, e.g. 'human robot collaboration future'>
   ],
-  "dalle_prompt": "<detailed DALL-E 3 prompt — cinematic tech style, dark background, blue/cyan accent light, no people, NO text, NO logos, NO watermarks, 16:9>",
-  "visual_theme": "<one sentence: what a perfect image should visually convey>",
-  "main_entity": "<primary company/person/technology this post is about, or null>",
-  "forbidden_brands": ["<competitor brand names/logos that must NOT appear>"],
-  "min_score": <7 if post is about a specific named company, 6 if general tech>
+  "serp_queries": [
+    "<Google Images query: company name + specific context, e.g. 'Anthropic AI company Claude'>",
+    "<Google Images query: company + product/office/team, e.g. 'Anthropic headquarters San Francisco'>",
+    "<Google Images query: company + news/event, e.g. 'Anthropic AI safety research 2025'>"
+  ],
+  "dalle_prompt": "<Highly detailed DALL-E 3 prompt. Include: specific subject, lighting (cinematic, dramatic), color palette (brand colors if known), mood, composition. NO text, NO logos, NO watermarks, NO people. 16:9 aspect>",
+  "visual_theme": "<one sentence: what a perfect image must visually convey>",
+  "visual_style": "<company/topic brand aesthetic, e.g. 'Anthropic: warm coral and cream tones, minimalist, human-centered AI' or 'futuristic dark tech with cyan accents'>",
+  "main_entity": "<specific company/product/person name, or null if general topic>",
+  "forbidden_brands": ["<direct competitor names/products whose logos must NOT appear>"],
+  "min_score": <7 for named company/product, 6 for general concept>
 }`
         }
       ]
@@ -108,70 +118,61 @@ Respond ONLY in valid JSON (no markdown fences):
     { headers: { Authorization: `Bearer ${OPENAI_KEY}` } }
   );
 
-  // Track tokens
   const usage = response.data.usage;
   costs.keyword_extraction.input_tokens  += usage.prompt_tokens;
   costs.keyword_extraction.output_tokens += usage.completion_tokens;
   costs.keyword_extraction.usd = calcTokenCost('gpt-4o-mini',
-    costs.keyword_extraction.input_tokens,
-    costs.keyword_extraction.output_tokens
-  );
+    costs.keyword_extraction.input_tokens, costs.keyword_extraction.output_tokens);
 
   const content = response.data.choices[0].message.content.trim();
   const json = content.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
   return JSON.parse(json);
 }
 
-// ─── Step 2a: Pexels ──────────────────────────────────────────────────────────
+// ─── Image sources ────────────────────────────────────────────────────────────
+
 async function searchPexels(query) {
   const res = await axios.get('https://api.pexels.com/v1/search', {
     headers: { Authorization: PEXELS_KEY },
     params: { query, per_page: 8, orientation: 'landscape' }
   });
   return (res.data.photos || []).map(p => ({
-    url: p.src.large2x,
-    source: 'pexels',
-    credit: p.photographer
+    url: p.src.large2x, source: 'pexels', credit: p.photographer
   }));
 }
 
-// ─── Step 2b: Unsplash ────────────────────────────────────────────────────────
 async function searchUnsplash(query) {
   const res = await axios.get('https://api.unsplash.com/search/photos', {
     headers: { Authorization: `Client-ID ${UNSPLASH_KEY}` },
     params: { query, per_page: 8, orientation: 'landscape' }
   });
   return (res.data.results || []).map(p => ({
-    url: p.urls.regular,
-    source: 'unsplash',
-    credit: p.user.name
+    url: p.urls.regular, source: 'unsplash', credit: p.user.name
   }));
 }
 
-// ─── Step 2c: SERP API ────────────────────────────────────────────────────────
 async function searchSerpApi(query, costs) {
   const res = await axios.get('https://serpapi.com/search', {
-    params: { engine: 'google_images', q: query, api_key: SERP_KEY, num: 5, safe: 'active' }
+    params: { engine: 'google_images', q: query, api_key: SERP_KEY, num: 8, safe: 'active' }
   });
   costs.serp_api.calls += 1;
   costs.serp_api.usd = costs.serp_api.calls * PRICE.serp;
-  return (res.data.images_results || []).slice(0, 5).map(img => ({
-    url: img.original,
-    source: 'serp_google_images',
-    credit: img.source
+  return (res.data.images_results || []).slice(0, 8).map(img => ({
+    url: img.original, source: 'serp_google_images', credit: img.source
   }));
 }
 
-// ─── Step 2d: DALL-E 3 ────────────────────────────────────────────────────────
-async function generateWithDalle(prompt, costs) {
+async function generateWithDalle(prompt, visualStyle, costs) {
+  const styleHint = visualStyle
+    ? ` Visual style: ${visualStyle}.`
+    : ' Cinematic tech aesthetic, dark background with blue/cyan accent lights.';
+
   const res = await axios.post(
     'https://api.openai.com/v1/images/generations',
     {
       model: 'dall-e-3',
-      prompt: prompt + '. Cinematic tech aesthetic, dark background with blue/cyan accent lights, NO text, NO logos, NO watermarks, NO people, professional LinkedIn post image, 16:9.',
-      n: 1,
-      size: '1792x1024',
-      quality: 'standard'
+      prompt: prompt + styleHint + ' NO text, NO logos, NO watermarks, NO visible people, professional LinkedIn post image, 16:9 widescreen format.',
+      n: 1, size: '1792x1024', quality: 'standard'
     },
     { headers: { Authorization: `Bearer ${OPENAI_KEY}` } }
   );
@@ -182,16 +183,15 @@ async function generateWithDalle(prompt, costs) {
     source: 'openai_dalle3',
     credit: 'AI Generated',
     score: 9,
-    reason: 'Custom generated to exactly match post topic'
+    reason: 'Custom generated for exact topic and brand style'
   };
 }
 
-// ─── Step 3: GPT-4o Vision — visually inspect and score one candidate ─────────
-async function scoreImage(candidate, context, costs) {
-  const { visual_theme, main_entity, forbidden_brands } = context;
+// ─── GPT-4o Vision: score ONE image ──────────────────────────────────────────
+async function scoreImage(candidate, context) {
+  const { visual_theme, visual_style, main_entity, forbidden_brands } = context;
   const forbiddenStr = (forbidden_brands && forbidden_brands.length)
-    ? forbidden_brands.join(', ')
-    : 'none';
+    ? forbidden_brands.join(', ') : 'none';
 
   const response = await axios.post(
     'https://api.openai.com/v1/chat/completions',
@@ -205,15 +205,16 @@ async function scoreImage(candidate, context, costs) {
           content: [
             {
               type: 'text',
-              text: `Visually inspect this image and score it for use as a LinkedIn post header.
+              text: `Visually inspect this image. Score it for a LinkedIn post header.
 
 Post theme: "${visual_theme}"
+Expected visual style: "${visual_style || 'professional tech'}"
 Main subject: ${main_entity || 'general technology'}
-Forbidden brands/logos that must NOT appear: ${forbiddenStr}
+Forbidden brands/logos: ${forbiddenStr}
 
-Use the scoring rubric from your quality guide (1–10).
-Respond ONLY in valid JSON (no markdown):
-{"score": <number 1-10>, "reason": "<one short sentence>", "has_forbidden_brand": <true or false>}`
+Score 1–10 (see rubric in your guide). Give extra credit (+1) if this is a real, recognizable photo OF the main company/product.
+Respond ONLY in valid JSON:
+{"score": <1-10>, "reason": "<one short sentence>", "has_forbidden_brand": <true|false>}`
             },
             { type: 'image_url', image_url: { url: candidate.url, detail: 'low' } }
           ]
@@ -223,36 +224,43 @@ Respond ONLY in valid JSON (no markdown):
     { headers: { Authorization: `Bearer ${OPENAI_KEY}` } }
   );
 
-  // Track tokens
-  const usage = response.data.usage;
-  costs.vision_scoring.calls       += 1;
-  costs.vision_scoring.input_tokens  += usage.prompt_tokens;
-  costs.vision_scoring.output_tokens += usage.completion_tokens;
-  costs.vision_scoring.usd = calcTokenCost('gpt-4o',
-    costs.vision_scoring.input_tokens,
-    costs.vision_scoring.output_tokens
-  );
-
   const content = response.data.choices[0].message.content.trim();
   const json = content.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
   const result = JSON.parse(json);
-  return { ...candidate, score: result.score, reason: result.reason, has_forbidden_brand: result.has_forbidden_brand };
+  return {
+    ...candidate,
+    score: result.score,
+    reason: result.reason,
+    has_forbidden_brand: result.has_forbidden_brand,
+    _usage: response.data.usage
+  };
 }
 
-// ─── Step 4: Score a batch and return the best above threshold ────────────────
+// ─── Score a batch IN PARALLEL, accumulate costs, return best above threshold ─
 async function pickBestFromBatch(candidates, context, minScore, costs) {
-  const scored = [];
-  console.log(`      Inspecting ${candidates.length} candidates with GPT-4o Vision...`);
+  if (!candidates.length) return null;
+  console.log(`      Scoring ${candidates.length} candidates in parallel with GPT-4o Vision...`);
 
-  for (const candidate of candidates) {
-    try {
-      const result = await scoreImage(candidate, context, costs);
-      const flag = result.has_forbidden_brand ? ' ✗ FORBIDDEN BRAND' : '';
-      console.log(`      [${result.score}/10] ${result.source} — ${result.reason}${flag}`);
-      if (!result.has_forbidden_brand) scored.push(result);
-    } catch (e) {
-      console.warn(`      Vision scoring error: ${e.message}`);
+  const results = await Promise.allSettled(candidates.map(c => scoreImage(c, context)));
+
+  const scored = [];
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      console.warn(`      Vision error: ${r.reason?.message}`);
+      continue;
     }
+    const result = r.value;
+    // Accumulate tokens
+    if (result._usage) {
+      costs.vision_scoring.calls       += 1;
+      costs.vision_scoring.input_tokens  += result._usage.prompt_tokens;
+      costs.vision_scoring.output_tokens += result._usage.completion_tokens;
+      costs.vision_scoring.usd = calcTokenCost('gpt-4o',
+        costs.vision_scoring.input_tokens, costs.vision_scoring.output_tokens);
+    }
+    const flag = result.has_forbidden_brand ? ' ✗ FORBIDDEN' : '';
+    console.log(`      [${result.score}/10] ${result.source} — ${result.reason}${flag}`);
+    if (!result.has_forbidden_brand) scored.push(result);
   }
 
   if (!scored.length) return null;
@@ -260,14 +268,39 @@ async function pickBestFromBatch(candidates, context, minScore, costs) {
   const best = scored[0];
 
   if (best.score >= minScore) {
-    console.log(`      ✓ Winner: score ${best.score}/10 from ${best.source}`);
+    console.log(`      ✓ Winner: ${best.score}/10 from ${best.source}`);
     return best;
   }
-  console.log(`      Best score ${best.score} < threshold ${minScore}, continuing...`);
+  console.log(`      Best was ${best.score} < threshold ${minScore}`);
   return null;
 }
 
-// ─── Step 5: Download & resize to LinkedIn ideal 1200×628 ────────────────────
+// ─── Collect candidates from all sources IN PARALLEL ─────────────────────────
+async function fetchRound(pexelsQuery, unsplashQuery, serpQuery, costs) {
+  const [pexels, unsplash, serp] = await Promise.all([
+    pexelsQuery
+      ? searchPexels(pexelsQuery).catch(e => { console.warn('Pexels:', e.message); return []; })
+      : Promise.resolve([]),
+    unsplashQuery
+      ? searchUnsplash(unsplashQuery).catch(e => { console.warn('Unsplash:', e.message); return []; })
+      : Promise.resolve([]),
+    (serpQuery && SERP_KEY)
+      ? searchSerpApi(serpQuery, costs).catch(e => { console.warn('SERP:', e.message); return []; })
+      : Promise.resolve([])
+  ]);
+
+  // Interleave: SERP first (most specific), then Pexels/Unsplash
+  const combined = [];
+  const maxLen = Math.max(serp.length, pexels.length, unsplash.length);
+  for (let i = 0; i < maxLen && combined.length < 15; i++) {
+    if (serp[i])    combined.push(serp[i]);
+    if (pexels[i])  combined.push(pexels[i]);
+    if (unsplash[i]) combined.push(unsplash[i]);
+  }
+  return combined;
+}
+
+// ─── Download & resize to LinkedIn ideal 1200×628 ────────────────────────────
 async function downloadImage(url, filepath) {
   const response = await axios({ url, responseType: 'arraybuffer', timeout: 30000 });
   await sharp(Buffer.from(response.data))
@@ -276,14 +309,13 @@ async function downloadImage(url, filepath) {
     .toFile(filepath);
 }
 
-// ─── Step 6a: Get or create Drive folder ─────────────────────────────────────
+// ─── Drive helpers ────────────────────────────────────────────────────────────
 async function getOrCreateFolder(parentId, folderName) {
   const res = await drive.files.list({
     q: `name='${folderName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
     fields: 'files(id, name)'
   });
   if (res.data.files.length > 0) return res.data.files[0].id;
-
   const folder = await drive.files.create({
     requestBody: { name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] },
     fields: 'id'
@@ -291,23 +323,19 @@ async function getOrCreateFolder(parentId, folderName) {
   return folder.data.id;
 }
 
-// ─── Step 6b: Upload to Drive and make public ─────────────────────────────────
 async function uploadToDrive(filePath, fileName, topic) {
   const date = new Date().toISOString().split('T')[0];
   const folderName = `${date} \u2014 ${topic.replace(/\s+/g, '_').toLowerCase()}`;
   const folderId = await getOrCreateFolder(GOOGLE_ROOT_FOLDER_ID, folderName);
-
   const res = await drive.files.create({
     requestBody: { name: fileName, parents: [folderId] },
     media: { mimeType: 'image/jpeg', body: fs.createReadStream(filePath) },
     fields: 'id, webViewLink'
   });
-
   await drive.permissions.create({
     fileId: res.data.id,
     requestBody: { role: 'reader', type: 'anyone' }
   });
-
   return { file_id: res.data.id, drive_link: res.data.webViewLink, folder: folderName };
 }
 
@@ -323,71 +351,71 @@ app.post('/api/find-image', async (req, res) => {
 
   try {
     // 1. Deep keyword extraction
-    console.log('[1/4] Analyzing post with quality guide...');
+    console.log('[1/4] Analyzing post...');
     const context = await extractKeywords(linkedin_post, costs);
-    const { topic, search_queries, dalle_prompt, main_entity, forbidden_brands, min_score } = context;
+    const { topic, search_queries, serp_queries, dalle_prompt, visual_style,
+            main_entity, forbidden_brands, min_score } = context;
     const threshold = min_score || 7;
     console.log(`      topic="${topic}"  entity="${main_entity}"  threshold=${threshold}/10`);
+    console.log(`      visual_style="${visual_style}"`);
     console.log(`      forbidden=${JSON.stringify(forbidden_brands)}`);
-    console.log(`      queries=${JSON.stringify(search_queries)}`);
+    console.log(`      stock_queries=${JSON.stringify(search_queries)}`);
+    console.log(`      serp_queries=${JSON.stringify(serp_queries)}`);
 
-    // 2. Collect candidates from free sources (query[0] = most specific)
-    console.log('[2/4] Fetching candidates from free sources...');
+    // 2. Round 1 — PARALLEL fetch from ALL sources simultaneously
+    //    SERP runs from the start for named companies (real photos > generic stock)
+    console.log('[2/4] Round 1: fetching from all sources in parallel...');
     let imageResult = null;
 
-    const [pexels0, unsplash0] = await Promise.all([
-      searchPexels(search_queries[0]).catch(e => { console.warn('Pexels q0 failed:', e.message); return []; }),
-      searchUnsplash(search_queries[0]).catch(e => { console.warn('Unsplash q0 failed:', e.message); return []; })
-    ]);
-
-    // Interleave for diversity, cap at 10
-    const freeCandidates = [];
-    const maxLen = Math.max(pexels0.length, unsplash0.length);
-    for (let i = 0; i < maxLen && freeCandidates.length < 10; i++) {
-      if (pexels0[i]) freeCandidates.push(pexels0[i]);
-      if (unsplash0[i]) freeCandidates.push(unsplash0[i]);
+    const round1 = await fetchRound(
+      search_queries[0],
+      search_queries[0],
+      serp_queries ? serp_queries[0] : null,
+      costs
+    );
+    console.log(`      Round 1: ${round1.length} candidates`);
+    if (round1.length) {
+      imageResult = await pickBestFromBatch(round1, context, threshold, costs);
     }
 
-    if (freeCandidates.length > 0) {
-      imageResult = await pickBestFromBatch(freeCandidates, context, threshold, costs);
-    }
-
-    // Retry with broader query[1] if no winner
-    if (!imageResult && search_queries[1]) {
-      console.log('      No winner — retrying with broader query...');
-      const [pexels1, unsplash1] = await Promise.all([
-        searchPexels(search_queries[1]).catch(() => []),
-        searchUnsplash(search_queries[1]).catch(() => [])
-      ]);
-      const broader = [];
-      const bLen = Math.max(pexels1.length, unsplash1.length);
-      for (let i = 0; i < bLen && broader.length < 8; i++) {
-        if (pexels1[i]) broader.push(pexels1[i]);
-        if (unsplash1[i]) broader.push(unsplash1[i]);
-      }
-      if (broader.length > 0) {
-        imageResult = await pickBestFromBatch(broader, context, threshold - 1, costs);
-      }
-    }
-
-    // SERP fallback (~$0.001/call)
-    if (!imageResult && SERP_KEY) {
-      console.log('      Trying SERP API...');
-      const serpCandidates = await searchSerpApi(search_queries[1] || search_queries[0], costs)
-        .catch(e => { console.warn('SERP failed:', e.message); return []; });
-      if (serpCandidates.length > 0) {
-        imageResult = await pickBestFromBatch(serpCandidates, context, threshold - 1, costs);
-      }
-    }
-
-    // DALL-E 3 last resort (~$0.08/image at 1792×1024)
+    // Round 2 — broader queries, lower threshold
     if (!imageResult) {
-      console.log('      All sources exhausted — generating with DALL-E 3 (~$0.08)...');
-      imageResult = await generateWithDalle(dalle_prompt, costs).catch(e => {
+      console.log('      Round 2: trying broader queries...');
+      const round2 = await fetchRound(
+        search_queries[1],
+        search_queries[1],
+        serp_queries ? serp_queries[1] : null,
+        costs
+      );
+      console.log(`      Round 2: ${round2.length} candidates`);
+      if (round2.length) {
+        imageResult = await pickBestFromBatch(round2, context, threshold - 1, costs);
+      }
+    }
+
+    // Round 3 — creative/abstract queries + second SERP angle, threshold -2
+    if (!imageResult) {
+      console.log('      Round 3: trying abstract/creative angle...');
+      const round3 = await fetchRound(
+        search_queries[2],
+        search_queries[2],
+        serp_queries ? serp_queries[2] : null,
+        costs
+      );
+      console.log(`      Round 3: ${round3.length} candidates`);
+      if (round3.length) {
+        imageResult = await pickBestFromBatch(round3, context, threshold - 2, costs);
+      }
+    }
+
+    // Last resort — DALL-E 3 generates a custom image using brand style
+    if (!imageResult) {
+      console.log('      All rounds exhausted — generating custom image with DALL-E 3...');
+      imageResult = await generateWithDalle(dalle_prompt, visual_style, costs).catch(e => {
         console.warn('DALL-E 3 failed:', e.message);
         return null;
       });
-      if (imageResult) console.log('      ✓ Generated with DALL-E 3');
+      if (imageResult) console.log(`      ✓ DALL-E 3 generated`);
     }
 
     if (!imageResult) throw new Error('All image sources failed');
@@ -399,7 +427,7 @@ app.post('/api/find-image', async (req, res) => {
     tempPath = path.join(os.tmpdir(), filename);
     await downloadImage(imageResult.url, tempPath);
 
-    // 4. Upload to Google Drive
+    // 4. Upload to Drive
     console.log('[4/4] Uploading to Google Drive...');
     const { file_id, drive_link, folder } = await uploadToDrive(tempPath, filename, topic);
     console.log(`      ✓ Uploaded: ${drive_link}`);
@@ -407,21 +435,18 @@ app.post('/api/find-image', async (req, res) => {
     fs.unlinkSync(tempPath);
     tempPath = null;
 
-    // Compute grand total
-    costs.total_usd = (
+    // Finalize costs
+    costs.total_usd =
       costs.keyword_extraction.usd +
       costs.vision_scoring.usd +
       costs.serp_api.usd +
-      costs.dalle3.usd
-    );
+      costs.dalle3.usd;
 
-    // Log cost summary
-    console.log(`\n💰 Cost breakdown:`);
-    console.log(`   Keyword extraction (gpt-4o-mini): ${costs.keyword_extraction.input_tokens} in + ${costs.keyword_extraction.output_tokens} out → $${costs.keyword_extraction.usd.toFixed(6)}`);
-    console.log(`   Vision scoring (gpt-4o): ${costs.vision_scoring.calls} images, ${costs.vision_scoring.input_tokens} in + ${costs.vision_scoring.output_tokens} out → $${costs.vision_scoring.usd.toFixed(6)}`);
+    console.log(`\n💰 Cost summary:`);
+    console.log(`   Keyword extraction (gpt-4o-mini): ${costs.keyword_extraction.input_tokens}in + ${costs.keyword_extraction.output_tokens}out → $${costs.keyword_extraction.usd.toFixed(6)}`);
+    console.log(`   Vision scoring (gpt-4o): ${costs.vision_scoring.calls} images, ${costs.vision_scoring.input_tokens}in + ${costs.vision_scoring.output_tokens}out → $${costs.vision_scoring.usd.toFixed(6)}`);
     if (costs.serp_api.calls) console.log(`   SERP API: ${costs.serp_api.calls} call(s) → $${costs.serp_api.usd.toFixed(4)}`);
     if (costs.dalle3.calls)   console.log(`   DALL-E 3: ${costs.dalle3.calls} image(s) → $${costs.dalle3.usd.toFixed(4)}`);
-    console.log(`   ─────────────────────────────────────────`);
     console.log(`   TOTAL: $${costs.total_usd.toFixed(6)}\n`);
 
     return res.json({
@@ -434,6 +459,7 @@ app.post('/api/find-image', async (req, res) => {
       score_reason: imageResult.reason || null,
       topic,
       main_entity: main_entity || null,
+      visual_style: visual_style || null,
       folder,
       cost_breakdown: {
         keyword_extraction: {
@@ -449,14 +475,8 @@ app.post('/api/find-image', async (req, res) => {
           output_tokens: costs.vision_scoring.output_tokens,
           usd:           +costs.vision_scoring.usd.toFixed(6)
         },
-        serp_api: {
-          calls: costs.serp_api.calls,
-          usd:   +costs.serp_api.usd.toFixed(6)
-        },
-        dalle3: {
-          calls: costs.dalle3.calls,
-          usd:   +costs.dalle3.usd.toFixed(6)
-        },
+        serp_api: { calls: costs.serp_api.calls, usd: +costs.serp_api.usd.toFixed(6) },
+        dalle3:   { calls: costs.dalle3.calls,   usd: +costs.dalle3.usd.toFixed(6) },
         total_usd:     +costs.total_usd.toFixed(6),
         total_display: '$' + costs.total_usd.toFixed(4)
       }
